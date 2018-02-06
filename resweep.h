@@ -33,7 +33,14 @@ extern "C" {
 
 #define RESAMPLE_LUT_STEP 96
 
-float dynamicLut[RESAMPLE_LUT_STEP * MAX_SINC_WINDOW_SIZE * 2];
+typedef struct
+{
+	float value;
+	float delta;
+}
+lutEntry_t;
+
+lutEntry_t dynamicLut[RESAMPLE_LUT_STEP * MAX_SINC_WINDOW_SIZE];
 
 static inline unsigned int calc_gcd(unsigned int a, unsigned int b)
 {
@@ -63,12 +70,12 @@ static inline double exact_blackman_harris(double x)
 	return 0.35875 - 0.48829 * cos(2.0 * M_PI * x) + 0.14128 * cos(4.0 * M_PI * x) - 0.01168 * cos(6.0 * M_PI * x);
 }
 
-static inline void sinc_resample_createLut(float freqAdjust, int windowSize)
+static inline void sinc_resample_createLut(double freqAdjust, int windowSize)
 {
-	float *out, *in;
+	lutEntry_t *out, *in;
 	int i, j;
 
-	if (freqAdjust > 1.0f) freqAdjust = 1.0f;
+	if (freqAdjust > 1.0) freqAdjust = 1.0;
 
 	out = dynamicLut;
 	for (i = 0; i < RESAMPLE_LUT_STEP; i++)
@@ -79,27 +86,27 @@ static inline void sinc_resample_createLut(float freqAdjust, int windowSize)
 			double bpos = npos * (double)(1.0 / windowSize) + 0.5;
 			double s = exact_nsinc(npos * freqAdjust) * freqAdjust;
 			double w = exact_blackman_harris(bpos);
-			*out = s * w;
-			out += 2;
+			out->value = s * w;
+			out++;
 		}
 	}
 
 	out = dynamicLut;
-	in = out + windowSize * 2;
+	in = out + windowSize;
 	for (i = 0; i < RESAMPLE_LUT_STEP - 1; i++)
 	{
 		for (j = 0; j < windowSize; j++)
 		{
-			*(out + 1) = *in - *out;
-			out += 2;
-			in += 2;
+			out->delta = in->value - out->value;
+			out++;
+			in++;
 		}
 	}
 
 	for (j = 0; j < windowSize; j++)
 	{
-		*(out + 1) = 0;
-		out += 2;
+		out->delta = 0;
+		out++;
 	}
 }
 
@@ -111,7 +118,7 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 	float outPeriod, freqAdjust;
 	int subpos = 0;
 	int gcd = calc_gcd(inFreq, outFreq);
-	int i, j, c, next;
+	int i, c, next;
 
 	inFreq /= gcd;
 	outFreq /= gcd;
@@ -140,7 +147,8 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 	{
 		float samples[numChannels];
 		float offset = 1.0f - subpos * outPeriod;
-		float interp, *lutPart;
+		float interp;
+		lutEntry_t *lutPart;
 		int index;
 
 		for (c = 0; c < numChannels; c++)
@@ -149,19 +157,19 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 		interp = offset * (RESAMPLE_LUT_STEP - 1);
 		index = interp;
 		interp -= index;
-		lutPart = dynamicLut + index * windowSize * 2;
+		lutPart = dynamicLut + index * windowSize;
 
-		for (i = next; i < windowSize; i++)
+		for (i = next; i < windowSize; i++, lutPart++)
 		{
-			float scale = *lutPart++ + *lutPart++ * interp;
+			float scale = lutPart->value + lutPart->delta * interp;
 
 			for (c = 0; c < numChannels; c++)
 				samples[c] += y[i * numChannels + c] * scale;
 		}
 
-		for (i = 0; i < next; i++)
+		for (i = 0; i < next; i++, lutPart++)
 		{
-			float scale = *lutPart++ + *lutPart++ * interp;
+			float scale = lutPart->value + lutPart->delta * interp;
 
 			for (c = 0; c < numChannels; c++)
 				samples[c] += y[i * numChannels + c] * scale;
