@@ -119,6 +119,7 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 	int subpos = 0;
 	int gcd = calc_gcd(inFreq, outFreq);
 	int i, c, next;
+	float dither[numChannels];
 
 	inFreq /= gcd;
 	outFreq /= gcd;
@@ -127,6 +128,9 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 	freqAdjust = (inFreq > outFreq) ? ((float)outFreq / (float)inFreq) : 1.0f;
 
 	sinc_resample_createLut(freqAdjust, windowSize);
+
+	for (c = 0; c < numChannels; c++)
+		dither[c] = 0.0f;
 
 	for (i = 0; i < windowSize / 2 - 1; i++)
 	{
@@ -177,12 +181,15 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 
 		for (c = 0; c < numChannels; c++)
 		{
-			if (samples[c] > 32767)
+			float r = roundf(samples[c] + dither[c]);
+			dither[c] += samples[c] - r;
+
+			if (r > 32767)
 				*sampleOut++ = 32767;
-			else if (samples[c] < -32768)
+			else if (r < -32768)
 				*sampleOut++ = -32768;
 			else
-				*sampleOut++ = samples[c];
+				*sampleOut++ = r;
 		}
 
 		subpos += inFreq;
