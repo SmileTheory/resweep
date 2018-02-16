@@ -23,15 +23,10 @@ extern "C" {
 #define	M_1_PI 0.31830988618379067154
 #endif
 
-// 7 bits is good enough for 44.1khz -> 48khz upsampling
-// 8 bits is good for 1:2 upsampling
-// 10 bits is good for 2:1 downsampling
-// 12 bits is good for 4:1 downsampling
-// 14 bits is good for 8:1 downsampling
 #define MAX_SINC_WINDOW_BITS 12
 #define MAX_SINC_WINDOW_SIZE (1 << MAX_SINC_WINDOW_BITS)
 
-#define RESAMPLE_LUT_STEP 96
+#define RESAMPLE_LUT_STEP 256
 
 typedef struct
 {
@@ -62,31 +57,55 @@ static inline double exact_nsinc(double x)
 	return ((double)(M_1_PI) / x) * sin(M_PI * x);
 }
 
-static inline double exact_blackman_harris(double x)
+// https://ccrma.stanford.edu/~jos/sasp/Kaiser_Window.html
+static inline double I0(double x)
 {
-	if (x < 0.0 || x > 1.0)
-		return 0.0;
+	double r = 1.0, xx = x * x, xpow = xx, coeff = 0.25;
+	int k;
 
-	return 0.35875 - 0.48829 * cos(2.0 * M_PI * x) + 0.14128 * cos(4.0 * M_PI * x) - 0.01168 * cos(6.0 * M_PI * x);
+	// iterations until coeff ~= 0
+	// 19 for float32, 89 for float64, 880 for float80
+	for (k = 1; k < 89; k++)
+	{
+		r += xpow * coeff;
+		coeff /= (4 * k + 8) * k + 4;
+		xpow *= xx;
+	}
+
+	return r;
 }
 
-static inline void sinc_resample_createLut(double freqAdjust, int windowSize)
+// https://ccrma.stanford.edu/~jos/sasp/Kaiser_Window.html
+static inline double kaiser(int n, int length, double beta)
 {
+	double mid;
+
+	mid = 2 * n / (double)(length - 1) - 1.0;
+	mid *= mid;
+
+	return I0(beta * sqrt(1.0 - mid)) / I0(beta);
+}
+
+static inline void sinc_resample_createLut(int inFreq, int cutoffFreq2, int windowSize, double beta)
+{
+	double windowLut[windowSize];
+	double freqAdjust = 1.0;
 	lutEntry_t *out, *in;
 	int i, j;
 
-	if (freqAdjust > 1.0) freqAdjust = 1.0;
+	if (cutoffFreq2 < inFreq) freqAdjust = (double)cutoffFreq2 / (double)inFreq;
+
+	for (i = 0; i < windowSize; i++)
+		windowLut[i] = kaiser(i, windowSize, beta);
 
 	out = dynamicLut;
 	for (i = 0; i < RESAMPLE_LUT_STEP; i++)
 	{
+		double offset = i / (double)(RESAMPLE_LUT_STEP - 1) - windowSize / 2;
 		for (j = 0; j < windowSize; j++)
 		{
-			double npos = j - windowSize / 2 + i / (double)(RESAMPLE_LUT_STEP - 1);
-			double bpos = npos * (double)(1.0 / windowSize) + 0.5;
-			double s = exact_nsinc(npos * freqAdjust) * freqAdjust;
-			double w = exact_blackman_harris(bpos);
-			out->value = s * w;
+			double s = exact_nsinc((j + offset) * freqAdjust) * freqAdjust;
+			out->value = s * windowLut[j];
 			out++;
 		}
 	}
@@ -110,24 +129,22 @@ static inline void sinc_resample_createLut(double freqAdjust, int windowSize)
 	}
 }
 
-static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFreq, const short *wavIn, int sizeIn, int inFreq, int numChannels, int windowSize)
+static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFreq, const short *wavIn, int sizeIn, int inFreq, int cutoffFreq2, int numChannels, int windowSize, double beta)
 {
 	float y[windowSize * numChannels];
 	const short *sampleIn, *wavInEnd = wavIn + (sizeIn / 2);
 	short *sampleOut, *wavOutEnd = wavOut + (sizeOut / 2);
-	float outPeriod, freqAdjust;
+	float outPeriod;
 	int subpos = 0;
 	int gcd = calc_gcd(inFreq, outFreq);
 	int i, c, next;
 	float dither[numChannels];
 
+	sinc_resample_createLut(inFreq, cutoffFreq2, windowSize, beta);
+
 	inFreq /= gcd;
 	outFreq /= gcd;
 	outPeriod = 1.0f / outFreq;
-
-	freqAdjust = (inFreq > outFreq) ? ((float)outFreq / (float)inFreq) : 1.0f;
-
-	sinc_resample_createLut(freqAdjust, windowSize);
 
 	for (c = 0; c < numChannels; c++)
 		dither[c] = 0.0f;
@@ -207,7 +224,10 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 
 void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, int sizeIn, int inFreq, int numChannels)
 {
-	float ratio;
+	double sidelobeHeight = 96.0;
+	double transitionWidth = 1 / 16.0;
+	double beta = 0.0;
+	int cutoffFreq2 = outFreq;
 	int windowSize;
 
 	// Just copy if no resampling necessary
@@ -217,13 +237,21 @@ void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, 
 		return;
 	}
 
-	ratio = (float)outFreq / (float)inFreq;
+	// if upsampling, adjust transition width to frequency difference
+	// otherwise, adjust cutoff frequency by transition width
+	if (outFreq > inFreq)
+		transitionWidth = (outFreq - inFreq) / (double)(outFreq);
+	else
+		cutoffFreq2 = outFreq * (1.0 - transitionWidth);
 
-	// completely ad-hoc window size calculation
-	if (ratio > 1.0f)
-		ratio = 1.0f;
+	// https://www.mathworks.com/help/signal/ug/kaiser-window.html
+	if (sidelobeHeight > 50)
+		beta = 0.1102 * (sidelobeHeight - 8.7);
+	else if (sidelobeHeight >= 21)
+		beta = 0.5842 * pow(sidelobeHeight - 21.0, 0.4) + 0.07886 * (sidelobeHeight - 21.0);
 
-	windowSize = 1 << (int)(8 - log2f(ratio) * 2.0);
+	windowSize = (sidelobeHeight - 8.0) / (2.285 * transitionWidth) + 1;
+
 	if (windowSize > MAX_SINC_WINDOW_SIZE)
 		windowSize = MAX_SINC_WINDOW_SIZE;
 
@@ -231,11 +259,11 @@ void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, 
 	// number of channels need to be compiled as separate paths to ensure good
 	// vectorization by the compiler
 	if (numChannels == 1)
-		sinc_resample_internal(wavOut, sizeOut, outFreq, wavIn, sizeIn, inFreq, 1, windowSize);
+		sinc_resample_internal(wavOut, sizeOut, outFreq, wavIn, sizeIn, inFreq, cutoffFreq2, 1, windowSize, beta);
 	else if (numChannels == 2)
-		sinc_resample_internal(wavOut, sizeOut, outFreq, wavIn, sizeIn, inFreq, 2, windowSize);
+		sinc_resample_internal(wavOut, sizeOut, outFreq, wavIn, sizeIn, inFreq, cutoffFreq2, 2, windowSize, beta);
 	else
-		sinc_resample_internal(wavOut, sizeOut, outFreq, wavIn, sizeIn, inFreq, numChannels, windowSize);
+		sinc_resample_internal(wavOut, sizeOut, outFreq, wavIn, sizeIn, inFreq, cutoffFreq2, numChannels, windowSize, beta);
 
 }
 
