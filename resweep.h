@@ -23,10 +23,10 @@ extern "C" {
 #define	M_1_PI 0.31830988618379067154
 #endif
 
-#define MAX_SINC_WINDOW_BITS 12
-#define MAX_SINC_WINDOW_SIZE (1 << MAX_SINC_WINDOW_BITS)
-
-#define RESAMPLE_LUT_STEP 256
+#define SIDELOBE_HEIGHT 96
+#define MIN_TRANSITION_WIDTH (1.0 / 64.0)
+#define MAX_SINC_WINDOW_SIZE 2048
+#define RESAMPLE_LUT_STEP 128
 
 typedef struct
 {
@@ -51,12 +51,13 @@ static inline unsigned int calc_gcd(unsigned int a, unsigned int b)
 
 static inline double exact_nsinc(double x)
 {
-	if (x == 0.0 || x == -0.0)
+	if (x == 0.0)
 		return 1.0;
 
 	return ((double)(M_1_PI) / x) * sin(M_PI * x);
 }
 
+// Modified Bessel function of the first kind, order 0
 // https://ccrma.stanford.edu/~jos/sasp/Kaiser_Window.html
 static inline double I0(double x)
 {
@@ -78,22 +79,17 @@ static inline double I0(double x)
 // https://ccrma.stanford.edu/~jos/sasp/Kaiser_Window.html
 static inline double kaiser(int n, int length, double beta)
 {
-	double mid;
+	double mid = 2 * n / (double)(length - 1) - 1.0;
 
-	mid = 2 * n / (double)(length - 1) - 1.0;
-	mid *= mid;
-
-	return I0(beta * sqrt(1.0 - mid)) / I0(beta);
+	return I0(beta * sqrt(1.0 - mid * mid)) / I0(beta);
 }
 
 static inline void sinc_resample_createLut(int inFreq, int cutoffFreq2, int windowSize, double beta)
 {
 	double windowLut[windowSize];
-	double freqAdjust = 1.0;
+	double freqAdjust = (double)cutoffFreq2 / (double)inFreq;
 	lutEntry_t *out, *in;
 	int i, j;
-
-	if (cutoffFreq2 < inFreq) freqAdjust = (double)cutoffFreq2 / (double)inFreq;
 
 	for (i = 0; i < windowSize; i++)
 		windowLut[i] = kaiser(i, windowSize, beta);
@@ -224,10 +220,10 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 
 void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, int sizeIn, int inFreq, int numChannels)
 {
-	double sidelobeHeight = 96.0;
-	double transitionWidth = 1 / 16.0;
+	double sidelobeHeight = SIDELOBE_HEIGHT;
+	double transitionWidth = MIN_TRANSITION_WIDTH;
 	double beta = 0.0;
-	int cutoffFreq2 = outFreq;
+	int cutoffFreq2;
 	int windowSize;
 
 	// Just copy if no resampling necessary
@@ -238,11 +234,14 @@ void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, 
 	}
 
 	// if upsampling, adjust transition width to frequency difference
-	// otherwise, adjust cutoff frequency by transition width
 	if (outFreq > inFreq)
-		transitionWidth = (outFreq - inFreq) / (double)(outFreq);
-	else
-		cutoffFreq2 = outFreq * (1.0 - transitionWidth);
+		transitionWidth = (outFreq - inFreq) / (double)(inFreq);
+
+	if (transitionWidth < MIN_TRANSITION_WIDTH)
+		transitionWidth = MIN_TRANSITION_WIDTH;
+
+	// cutoff freq is always half transition width away from output freq
+	cutoffFreq2 = outFreq - transitionWidth * inFreq * 0.5;
 
 	// https://www.mathworks.com/help/signal/ug/kaiser-window.html
 	if (sidelobeHeight > 50)
