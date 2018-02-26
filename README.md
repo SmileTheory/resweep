@@ -4,7 +4,7 @@ A simple audio resampler.
 # What's this?
 Exactly what it says on the tin.
 
-It's not the fastest (That's probably https://github.com/depp/libfresample ) nor the highest quality (there are much better ones listed at http://src.infinitewave.ca/ ), but it is one of the free-est (unlicense) and simplest (~227 LOC as of this writing).
+It's not the fastest (That's probably https://github.com/depp/libfresample ) nor the highest quality (there are much better ones listed at http://src.infinitewave.ca/ ), but it is one of the free-est (unlicense) and simplest (~270 LOC as of this writing).
 
 As with many resamplers, this is based on the excellent documentation by Julius Orion Smith III at https://ccrma.stanford.edu/~jos/resample/resample.html , as well as numerous google searches and wikipedia readings.
 
@@ -12,7 +12,4 @@ As with many resamplers, this is based on the excellent documentation by Julius 
 I noticed a lack of public domain resamplers. They may exist, but my google-fu is weak.
 
 # How do I use it?
-It's not quite ready for use yet. I still need to work on documenting the API and such.  As well, I need to clean up and post an example.
-
-# Why are you using a Blackman-Harris window instead of a Kaiser-Bessel-derived one?
-Because I haven't gotten my head around Kaiser-Bessel-derived ones yet. But give me a minute.
+It's not quite ready for use yet. I still need to work on documenting the API and such.
