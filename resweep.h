@@ -24,7 +24,8 @@ extern "C" {
 #endif
 
 #define SIDELOBE_HEIGHT 96
-#define MIN_TRANSITION_WIDTH (1.0 / 64.0)
+#define UP_TRANSITION_WIDTH (1.0 / 32.0)
+#define DOWN_TRANSITION_WIDTH (1.0 / 128.0)
 #define MAX_SINC_WINDOW_SIZE 2048
 #define RESAMPLE_LUT_STEP 128
 
@@ -98,10 +99,19 @@ static inline void sinc_resample_createLut(int inFreq, int cutoffFreq2, int wind
 	for (i = 0; i < RESAMPLE_LUT_STEP; i++)
 	{
 		double offset = i / (double)(RESAMPLE_LUT_STEP - 1) - windowSize / 2;
+		double sum = 0.0;
 		for (j = 0; j < windowSize; j++)
 		{
-			double s = exact_nsinc((j + offset) * freqAdjust) * freqAdjust;
+			double s = exact_nsinc((j + offset) * freqAdjust);
 			out->value = s * windowLut[j];
+			sum += s;
+			out++;
+		}
+
+		out -= windowSize;
+		for (j = 0; j < windowSize; j++)
+		{
+			out->value /= sum;
 			out++;
 		}
 	}
@@ -221,7 +231,7 @@ static inline void sinc_resample_internal(short *wavOut, int sizeOut, int outFre
 void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, int sizeIn, int inFreq, int numChannels)
 {
 	double sidelobeHeight = SIDELOBE_HEIGHT;
-	double transitionWidth = MIN_TRANSITION_WIDTH;
+	double transitionWidth;
 	double beta = 0.0;
 	int cutoffFreq2;
 	int windowSize;
@@ -233,15 +243,14 @@ void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, 
 		return;
 	}
 
-	// if upsampling, adjust transition width to frequency difference
-	if (outFreq > inFreq)
-		transitionWidth = (outFreq - inFreq) / (double)(inFreq);
+	transitionWidth = (outFreq > inFreq) ? UP_TRANSITION_WIDTH : DOWN_TRANSITION_WIDTH;
 
-	if (transitionWidth < MIN_TRANSITION_WIDTH)
-		transitionWidth = MIN_TRANSITION_WIDTH;
-
-	// cutoff freq is always half transition width away from output freq
+	// cutoff freq is ideally half transition width away from output freq
 	cutoffFreq2 = outFreq - transitionWidth * inFreq * 0.5;
+
+	// FIXME: Figure out why there are bad effects with cutoffFreq2 > inFreq
+	if (cutoffFreq2 > inFreq)
+		cutoffFreq2 = inFreq;
 
 	// https://www.mathworks.com/help/signal/ug/kaiser-window.html
 	if (sidelobeHeight > 50)
@@ -249,7 +258,7 @@ void sinc_resample(short *wavOut, int sizeOut, int outFreq, const short *wavIn, 
 	else if (sidelobeHeight >= 21)
 		beta = 0.5842 * pow(sidelobeHeight - 21.0, 0.4) + 0.07886 * (sidelobeHeight - 21.0);
 
-	windowSize = (sidelobeHeight - 8.0) / (2.285 * transitionWidth) + 1;
+	windowSize = (sidelobeHeight - 8.0) / (2.285 * transitionWidth * M_PI) + 1;
 
 	if (windowSize > MAX_SINC_WINDOW_SIZE)
 		windowSize = MAX_SINC_WINDOW_SIZE;
